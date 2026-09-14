@@ -4,6 +4,7 @@ const crypto = require('crypto');
 const net = require('net');
 const https = require('https');
 const dns = require('dns');
+const os = require('os');
 const { execFile, execFileSync, spawn } = require('child_process');
 
 /**
@@ -529,19 +530,12 @@ async function fetchWithRetry(url, options, maxRetries = 8) {
   let throttleAttempt = 0;
   const maxThrottleRetries = 5; // 官方早高峰 9074 限流最大独立重试次数
 
-  // 1. 发起请求前，主动探活系统 DNS 是否被 Proxifier 等代理劫持为 Fake IP (127.x.x.x)
-  if (!cachedDirectCdnIp) {
-    const fakeCheck = await checkIsFakeIp('api.trae.cn');
-    if (fakeCheck.isFake) {
-      writeLog(`检测到系统代理环境将 api.trae.cn 劫持为虚拟 Fake IP (${fakeCheck.ip || fakeCheck.reason})，正在激活火山引擎官方 CDN 直连通道...`, 'WARN');
-      cachedDirectCdnIp = await resolveRealIpViaDoh('api.trae.cn');
-      writeLog(`已自动接入火山引擎官方直连节点: ${cachedDirectCdnIp} (SNI 证书保护)`, 'SUCCESS');
-    }
-  }
+  // 1. 默认优先走系统原生网络/代理通道（与客户端保持相同链路），故障时按需降级至官方 CDN 节点
+  let useDirectIp = cachedDirectCdnIp || null;
 
   while (attempt <= maxRetries) {
     try {
-      const res = await requestHttp(url, options, cachedDirectCdnIp);
+      const res = await requestHttp(url, options, useDirectIp);
 
       if (res.status === 401) {
         throw new Error('HTTP 401: 登录凭据 token 已失效，请在 Trae 客户端重新登录。');
@@ -576,10 +570,11 @@ async function fetchWithRetry(url, options, maxRetries = 8) {
       }
 
       // 若发生网络异常且尚未启用直连 IP（或错误信息包含 127. 虚拟地址），立即无缝切换为官方 CDN 直连
-      if (!cachedDirectCdnIp || (err.message && err.message.includes('127.'))) {
-        writeLog(`检测到网络链路抖动 (${err.message})，自动切换至火山引擎官方 CDN 直连节点重试...`, 'WARN');
+      if (!useDirectIp || (err.message && err.message.includes('127.'))) {
+        writeLog(`检测到网络链路异常 (${err.message})，自动切换至火山引擎官方 CDN 直连节点进行故障降级重试...`, 'WARN');
         cachedDirectCdnIp = await resolveRealIpViaDoh('api.trae.cn');
-        writeLog(`已自动接入火山引擎官方直连节点: ${cachedDirectCdnIp} (SNI 证书保护)`, 'SUCCESS');
+        useDirectIp = cachedDirectCdnIp;
+        writeLog(`已自动接入火山引擎官方直连节点: ${useDirectIp} (SNI 证书保护)`, 'SUCCESS');
       }
 
       if (attempt < maxRetries) {
@@ -713,12 +708,40 @@ async function main() {
     writeLog('本地记录的 Token 已过有效期，尝试请求若报 401 请重新打开 Trae 客户端刷新登录。', 'WARN');
   }
 
-  // 5. 严格装配拟真官方完整设备请求头
+  // 5. 提取真实字节跳动设备 ID（DID）与客户端版本识别
+  let realDeviceId = '';
+  for (const key of Object.keys(storage)) {
+    const match = key.match(/iCubeAuthInfo:\/\/icube-dc:(\d+)/);
+    if (match) {
+      realDeviceId = match[1];
+      break;
+    }
+  }
+  if (!realDeviceId && storageInfo.path) {
+    try {
+      const localEnvPath = path.join(path.dirname(storageInfo.path), '..', '..', 'ModularData', 'ckg_server', 'local_env.json');
+      if (fs.existsSync(localEnvPath)) {
+        const envJson = JSON.parse(fs.readFileSync(localEnvPath, 'utf8'));
+        if (envJson.device_id) realDeviceId = String(envJson.device_id);
+      }
+    } catch (e) {}
+  }
+  const deviceId = realDeviceId || storage['telemetry.devDeviceId'] || '';
+
+  // 识别客户端来源类型 (TRAE SOLO CN 为 2，普通版 Trae CN 为 1)
+  const isSolo = (storageInfo.dirName && storageInfo.dirName.toLowerCase().includes('solo')) ||
+                 (storageInfo.path && storageInfo.path.toLowerCase().includes('solo'));
+  const reqSource = isSolo ? 2 : 1;
+
+  // 严格装配拟真官方完整设备请求头 (大小写与官方客户端 100% 保持一致)
   const headers = {
     'Authorization': `Cloud-IDE-JWT ${auth.token}`,
     'Content-Type': 'application/json',
+    'x-device-id': deviceId,
+    'x-device-type': process.platform === 'win32' ? 'Windows' : (process.platform === 'darwin' ? 'Darwin' : 'Linux'),
+    'x-os-version': os.release ? os.release() : '',
     'X-Machine-Id': storage['telemetry.machineId'] || '',
-    'X-Device-Id': storage['telemetry.devDeviceId'] || '',
+    'X-Device-Id': deviceId,
     'X-User-Id': String(auth.userId || ''),
     'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Trae/1.0.0 Chrome/120.0.0.0 Electron/28.0.0 Safari/537.36'
   };
@@ -726,7 +749,7 @@ async function main() {
     headers['X-User-Region'] = auth.userRegion.region;
   }
 
-  writeLog(`登录凭据解析成功（用户: ${maskUserId(auth.userId)}，关联客户端: ${storageInfo.dirName}）`, 'AUTH');
+  writeLog(`登录凭据解析成功（用户: ${maskUserId(auth.userId)}，关联客户端: ${storageInfo.dirName}，DID: ${deviceId ? maskUserId(deviceId) : '自动生成'}，来源: ${isSolo ? 'SOLO (2)' : '标准版 (1)'}）`, 'AUTH');
 
   // 6. 前置查询今日签到状态（先查后签）
   let statusData = null;
@@ -738,7 +761,7 @@ async function main() {
     statusData = await fetchWithRetry(STATUS_URL, {
       method: 'POST',
       headers,
-      body: JSON.stringify({})
+      body: JSON.stringify({ req_source: reqSource })
     }, 5);
 
     if (statusData && (statusData.code === 0 || statusData.code === undefined)) {
@@ -846,7 +869,7 @@ async function main() {
     const claim = await fetchWithRetry(CLAIM_URL, {
       method: 'POST',
       headers,
-      body: JSON.stringify({})
+      body: JSON.stringify({ req_source: reqSource })
     }, 8);
 
     if (claim.code === 0) {
@@ -899,7 +922,7 @@ async function main() {
       const updatedStatus = await fetchWithRetry(STATUS_URL, {
         method: 'POST',
         headers,
-        body: JSON.stringify({})
+        body: JSON.stringify({ req_source: reqSource })
       }, 2);
       if (updatedStatus && updatedStatus.code === 0) {
         statusData = updatedStatus;
