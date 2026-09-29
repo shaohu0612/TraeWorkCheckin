@@ -165,8 +165,17 @@ function registerRetryTask() {
     const pad = n => String(n).padStart(2, '0');
     const retryTime = `${pad(now.getHours())}:${pad(now.getMinutes())}`;
     const cmdPath = path.join(__dirname, 'run_traework_checkin.cmd');
+    const vbsPath = path.join(__dirname, 'run_traework_checkin_silent.vbs');
+    const wscriptExe = path.join(process.env.SystemRoot || 'C:\\Windows', 'System32', 'wscript.exe');
 
-    const psCmd = `schtasks /Create /TN '${RETRY_TASK_NAME}' /SC ONCE /ST ${retryTime} /TR '\\"${cmdPath}\\" --silent' /F`;
+    let taskTarget;
+    if (fs.existsSync(vbsPath)) {
+      taskTarget = `\\"${wscriptExe}\\" //B //Nologo \\"${vbsPath}\\"`;
+    } else {
+      taskTarget = `\\"${cmdPath}\\" --silent`;
+    }
+
+    const psCmd = `schtasks /Create /TN '${RETRY_TASK_NAME}' /SC ONCE /ST ${retryTime} /TR '${taskTarget}' /F`;
     try {
       execFileSync('powershell', ['-NoProfile', '-WindowStyle', 'Hidden', '-Command', psCmd], { stdio: 'ignore', timeout: 5000 });
       writeLog(`已激活第二道兜底保障：将于 ${retryTime} 自动执行重试任务（任务名: ${RETRY_TASK_NAME}）。`, 'FALLBACK');
@@ -731,7 +740,11 @@ async function main() {
       }
     } catch (e) {}
   }
-  const deviceId = realDeviceId || storage['telemetry.devDeviceId'] || '';
+  let deviceId = realDeviceId || storage['telemetry.devDeviceId'] || '';
+  if (!deviceId) {
+    deviceId = `${Math.floor(1 + Math.random() * 8)}${Array.from({ length: 15 }, () => Math.floor(Math.random() * 10)).join('')}`;
+  }
+  const machineId = storage['telemetry.machineId'] || crypto.randomUUID().replace(/-/g, '');
 
   // 识别客户端来源类型 (TRAE SOLO CN 为 2，普通版 Trae CN 为 1)
   const isSolo = (storageInfo.dirName && storageInfo.dirName.toLowerCase().includes('solo')) ||
@@ -745,7 +758,7 @@ async function main() {
     'x-device-id': deviceId,
     'x-device-type': process.platform === 'win32' ? 'Windows' : (process.platform === 'darwin' ? 'Darwin' : 'Linux'),
     'x-os-version': os.release ? os.release() : '',
-    'X-Machine-Id': storage['telemetry.machineId'] || '',
+    'X-Machine-Id': machineId,
     'X-Device-Id': deviceId,
     'X-User-Id': String(auth.userId || ''),
     'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Trae/1.0.0 Chrome/120.0.0.0 Electron/28.0.0 Safari/537.36'

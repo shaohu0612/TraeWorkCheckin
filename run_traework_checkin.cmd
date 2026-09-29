@@ -1,4 +1,4 @@
-﻿@echo off
+@echo off
 chcp 65001 >nul
 setlocal enabledelayedexpansion
 
@@ -65,9 +65,9 @@ if not defined FOUND_EXE (
   )
 )
 
-:: 2.5 Check PATH for trae.exe
+:: 2.5 Check PATH for trae executables
 if not defined FOUND_EXE (
-  for %%I in (trae.exe) do (
+  for %%I in (trae.exe "Trae CN.exe" "TRAE SOLO CN.exe" "Trae.exe") do (
     if not defined FOUND_EXE if "%%~$PATH:I" neq "" set "FOUND_EXE=%%~$PATH:I"
   )
 )
