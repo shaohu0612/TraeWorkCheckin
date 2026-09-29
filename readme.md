@@ -57,11 +57,14 @@ TraeWorkCheckin/
 ├── manage_autostart.cmd          # Windows 自启管理入口（双击即用）
 ├── manage_autostart.ps1          # Windows 交互式管理控制台（支持方向键/数字键，带 BOM）
 ├── run_traework_checkin_silent.vbs # Windows 纯静默隐形执行器（彻底杜绝黑框闪烁）
-├── run_traework_checkin.cmd      # Windows 核心专属执行器（杜绝与其它签到应用同名冲突）
+├── run_traework_checkin.cmd      # Windows 核心专属执行器（支持零 Node 借用 Trae 运行时）
 ├── run_checkin.cmd               # Windows 兼容快捷入口（自动转发至专属执行器）
-├── manage_autostart.sh           # macOS / Linux 交互式自启管理脚本
-├── run_checkin.sh                # macOS / Linux 核心执行器
-├── checkin.js                    # 核心业务引擎（网络自愈探测、防风控、三重兜底、桌面通知）
+├── manage_autostart.command      # macOS 双击启动控制台（Finder 中双击直接运行）
+├── run_checkin.command           # macOS 双击单次测试运行（Finder 中双击直接运行）
+├── manage_autostart.sh           # macOS / Linux 交互式自启管理脚本（带状态看板）
+├── run_traework_checkin.sh       # macOS / Linux 核心执行器别名
+├── run_checkin.sh                # macOS / Linux 核心执行器（支持 Apple Silicon / Intel 零依赖）
+├── checkin.js                    # 核心业务引擎（跨平台网络探测、防风控、00:00:30校准、原生通知）
 ├── doc/
 │   └── traework自动签到技术分析实现.md # 深度架构设计、逆向分析与全网对比白皮书
 └── log/
@@ -72,7 +75,7 @@ TraeWorkCheckin/
 
 ## 🚀 快速上手指南
 
-### 🪟 Windows 系统使用（推荐）
+### 🪟 Windows 系统使用
 
 #### 1. 配置全自动双轨签到（只需操作一次）
 直接双击运行 **`manage_autostart.cmd`**（或在 PowerShell 中运行 `manage_autostart.ps1`）：
@@ -87,7 +90,37 @@ TraeWorkCheckin/
 
 ---
 
-### 🍏 macOS / 🐧 Linux 系统使用
+### 🍏 苹果电脑 (macOS) 使用（极简小白指南）
+
+本项目专为 macOS 做了原生深度适配（全面支持 **Apple Silicon M系列 M1/M2/M3/M4** 以及 **Intel 芯片**），且**无需配置 Node.js**（自动调用 Mac 版 Trae 内置运行时）。
+
+#### 方式 A：鼠标双击操作（最推荐，零命令行门槛）
+1. 在访达（Finder）中打开本项目文件夹；
+2. **双击 `manage_autostart.command`**：系统会自动弹出终端窗口并展示漂亮的中文管理控制台；
+3. 输入数字 **`1`** 并按回车：一键激活 macOS 双轨全自动签到（基于系统级 `LaunchAgent` 服务）；
+4. 提示安装成功后即可关闭终端！以后无论是开机登录还是午夜 00:00:30 在线，都会在后台静默完成签到，并在屏幕右上角弹出系统通知。
+5. （可选）随时双击 **`run_checkin.command`** 即可在窗口中测试单次签到并查看详细日志播报。
+
+> 💡 **小贴士**：若初次双击弹出系统“未知的开发者”提示，只需在文件上**右键选择【打开】**，并在弹出对话框中点击【打开】即可正常信任运行。
+
+#### 方式 B：终端命令行操作
+```bash
+# 1. 赋予执行权限并打开管理控制台
+chmod +x *.sh *.command
+./manage_autostart.sh
+
+# 2. 在菜单中按 1 即可一键启用
+```
+
+#### macOS 双轨与休眠唤醒机制：
+- **开机与登录自启**：配置了 `RunAtLoad`，登录系统后自动唤醒轻量执行；
+- **午夜 00:00:30 定时触发**：配置了 `StartCalendarInterval`，若午夜电脑在线，程序自动校准至 `00:00:30` 规避并发高峰后完成当日签到；
+- **智能休眠唤醒补签**：根据 macOS Launchd 规范，若电脑在午夜处于合盖休眠状态，**Mac 唤醒的瞬间系统将自动补发触发**，杜绝漏签；
+- **原生右上角横幅**：执行成功后调用系统原生 Notification Center 弹出通知并伴随清脆提示音。
+
+---
+
+### 🐧 Linux 系统使用
 
 #### 1. 配置登录自动签到
 进入项目目录后执行自启管理脚本：
@@ -96,7 +129,7 @@ chmod +x manage_autostart.sh run_checkin.sh
 ./manage_autostart.sh
 ```
 - 输入对应数字确认操作：
-  - **选项 `1`**：macOS 自动创建 `com.traework.checkin` LaunchAgent 服务，Linux 自动创建 `traework_checkin.desktop` 桌面自启条目；
+  - **选项 `1`**：Linux 自动创建 `traework_checkin.desktop` 桌面自启条目与 `crontab` 每日午夜定时任务；
   - **选项 `2`**：彻底卸载清理；
   - **选项 `3`**：立即测试执行。
 

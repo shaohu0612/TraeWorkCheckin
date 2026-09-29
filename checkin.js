@@ -157,30 +157,40 @@ async function waitForNetwork(maxWaitSeconds = 300, intervalSeconds = 5) {
  * 注册单次延时重试计划任务 (确保任务名包含 TraeWork，杜绝命名冲突)
  */
 function registerRetryTask() {
-  if (process.platform !== 'win32') {
-    return;
-  }
   try {
-    const now = new Date(Date.now() + 30 * 60 * 1000); // 30 分钟后
-    const pad = n => String(n).padStart(2, '0');
-    const retryTime = `${pad(now.getHours())}:${pad(now.getMinutes())}`;
-    const cmdPath = path.join(__dirname, 'run_traework_checkin.cmd');
-    const vbsPath = path.join(__dirname, 'run_traework_checkin_silent.vbs');
-    const wscriptExe = path.join(process.env.SystemRoot || 'C:\\Windows', 'System32', 'wscript.exe');
+    if (process.platform === 'win32') {
+      const now = new Date(Date.now() + 30 * 60 * 1000); // 30 分钟后
+      const pad = n => String(n).padStart(2, '0');
+      const retryTime = `${pad(now.getHours())}:${pad(now.getMinutes())}`;
+      const cmdPath = path.join(__dirname, 'run_traework_checkin.cmd');
+      const vbsPath = path.join(__dirname, 'run_traework_checkin_silent.vbs');
+      const wscriptExe = path.join(process.env.SystemRoot || 'C:\\Windows', 'System32', 'wscript.exe');
 
-    let taskTarget;
-    if (fs.existsSync(vbsPath)) {
-      taskTarget = `\\"${wscriptExe}\\" //B //Nologo \\"${vbsPath}\\"`;
+      let taskTarget;
+      if (fs.existsSync(vbsPath)) {
+        taskTarget = `\\"${wscriptExe}\\" //B //Nologo \\"${vbsPath}\\"`;
+      } else {
+        taskTarget = `\\"${cmdPath}\\" --silent`;
+      }
+
+      const psCmd = `schtasks /Create /TN '${RETRY_TASK_NAME}' /SC ONCE /ST ${retryTime} /TR '${taskTarget}' /F`;
+      try {
+        execFileSync('powershell', ['-NoProfile', '-WindowStyle', 'Hidden', '-Command', psCmd], { stdio: 'ignore', timeout: 5000 });
+        writeLog(`已激活第二道兜底保障：将于 ${retryTime} 自动执行重试任务（任务名: ${RETRY_TASK_NAME}）。`, 'FALLBACK');
+      } catch (cmdErr) {
+        writeLog(`注册临时重试计划任务失败: ${cmdErr.message}`, 'WARN');
+      }
     } else {
-      taskTarget = `\\"${cmdPath}\\" --silent`;
-    }
-
-    const psCmd = `schtasks /Create /TN '${RETRY_TASK_NAME}' /SC ONCE /ST ${retryTime} /TR '${taskTarget}' /F`;
-    try {
-      execFileSync('powershell', ['-NoProfile', '-WindowStyle', 'Hidden', '-Command', psCmd], { stdio: 'ignore', timeout: 5000 });
-      writeLog(`已激活第二道兜底保障：将于 ${retryTime} 自动执行重试任务（任务名: ${RETRY_TASK_NAME}）。`, 'FALLBACK');
-    } catch (cmdErr) {
-      writeLog(`注册临时重试计划任务失败: ${cmdErr.message}`, 'WARN');
+      // macOS / Linux 跨平台兜底：启动后台轻量延时任务进行 30 分钟后重试
+      const runnerSh = path.join(__dirname, 'run_checkin.sh');
+      if (fs.existsSync(runnerSh)) {
+        const child = spawn('/bin/bash', ['-c', `sleep 1800 && /bin/bash "${runnerSh}" --silent`], {
+          detached: true,
+          stdio: 'ignore'
+        });
+        child.unref();
+        writeLog('已激活第二道兜底保障：将在 30 分钟后于后台自动重试签到。', 'FALLBACK');
+      }
     }
   } catch (e) {
     writeLog(`注册临时重试计划任务异常: ${e.message}`, 'WARN');
@@ -208,14 +218,14 @@ function cleanRetryTask() {
 
 /**
  * 跨平台弹出原生桌面系统通知（Windows Toast/托盘气泡、macOS 通知、Linux notify-send）
- * 在 Windows 平台下采用轻量同步阻塞执行（~200ms），确保通知指令稳妥交付系统底层后再释放进程退出
+ * 各平台均采用轻量同步阻塞执行，确保通知指令稳妥交付系统底层后再释放进程退出
  * @param {string} title 通知标题
  * @param {string} message 通知正文
  */
 function showNotification(title, message) {
   try {
-    const cleanTitle = String(title).replace(/["`$]/g, '').replace(/\r?\n/g, ' ');
-    const cleanMsg = String(message).replace(/["`$]/g, '').replace(/\r?\n/g, ' ');
+    const cleanTitle = String(title).replace(/["`$\\]/g, '').replace(/\r?\n/g, ' ');
+    const cleanMsg = String(message).replace(/["`$\\]/g, '').replace(/\r?\n/g, ' ');
 
     if (process.platform === 'win32') {
       const psCommand = `
@@ -251,17 +261,17 @@ function showNotification(title, message) {
         timeout: 4000
       });
     } else if (process.platform === 'darwin') {
-      const child = spawn('osascript', ['-e', `display notification "${cleanMsg}" with title "${cleanTitle}"`], {
-        detached: true,
-        stdio: 'ignore'
+      execFileSync('osascript', ['-e', `display notification "${cleanMsg}" with title "${cleanTitle}" sound name "default"`], {
+        stdio: 'ignore',
+        timeout: 4000
       });
-      child.unref();
     } else if (process.platform === 'linux') {
-      const child = spawn('notify-send', [cleanTitle, cleanMsg], {
-        detached: true,
-        stdio: 'ignore'
-      });
-      child.unref();
+      try {
+        execFileSync('notify-send', [cleanTitle, cleanMsg], {
+          stdio: 'ignore',
+          timeout: 4000
+        });
+      } catch (e) {}
     }
   } catch (e) {
     // 忽略通知异常，不影响核心签到业务
@@ -353,8 +363,11 @@ function findStorageFile() {
     candidateDirs = [];
   }
 
-  // 兜底常见官方客户端目录
-  const defaultDirs = ['Trae CN', 'TRAE SOLO CN', 'Trae', 'Trae%20CN', 'TraeCode CN', 'TraeCode'];
+  // 兜底常见官方客户端目录（涵盖 Windows / macOS / Linux 各种版本与大小写）
+  const defaultDirs = [
+    'Trae CN', 'TRAE SOLO CN', 'Trae', 'Trae%20CN', 'TraeCode CN', 'TraeCode',
+    'TRAE SOLO', 'TRAE', 'Trae-CN'
+  ];
   for (const d of defaultDirs) {
     if (!candidateDirs.includes(d)) candidateDirs.push(d);
   }
@@ -682,8 +695,18 @@ async function main() {
     process.exit(1);
   }
 
-  // 2. 防风控随机抖动延迟（仅在开机自启静默模式下打散固定时间指纹）
+  // 2. 防风控与跨日校准延迟（仅在后台静默模式下生效）
   if (silent && !dryRun && !force) {
+    const now = new Date();
+    // 若在午夜 00:00:00 ~ 00:00:29 期间被唤醒（例如 macOS launchd 或 Linux cron 零点触发）
+    // 自动等待校准至 00:00:30，确保服务端跨日数据完全就绪且契合用户设定
+    if (now.getHours() === 0 && now.getMinutes() === 0 && now.getSeconds() < 30) {
+      const waitSec = 30 - now.getSeconds();
+      writeLog(`检测到午夜定时任务唤醒，自动等待 ${waitSec} 秒至 00:00:30 完成跨日校准...`, 'WAIT');
+      await sleep(waitSec * 1000);
+    }
+
+    // 防风控随机抖动延迟（打散固定时间指纹）
     const jitterMs = Math.floor(Math.random() * 3000) + 2000; // 2~5 秒浮动延时
     await sleep(jitterMs);
   }
