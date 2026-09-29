@@ -33,6 +33,13 @@ install_macos() {
     </array>
     <key>RunAtLoad</key>
     <true/>
+    <key>StartCalendarInterval</key>
+    <dict>
+        <key>Hour</key>
+        <integer>0</integer>
+        <key>Minute</key>
+        <integer>0</integer>
+    </dict>
     <key>StandardOutPath</key>
     <string>$SCRIPT_DIR/log/checkin.log</string>
     <key>StandardErrorPath</key>
@@ -73,7 +80,7 @@ uninstall_macos() {
 
 install_linux() {
   echo ""
-  echo "[正在处理] 正在配置 Linux XDG 桌面自启条目..."
+  echo "[正在处理] 正在配置 Linux 桌面自启条目与每日零点定时任务..."
   AUTOSTART_DIR="$HOME/.config/autostart"
   DESKTOP_FILE="$AUTOSTART_DIR/traework_checkin.desktop"
   OLD_DESKTOP_FILE="$AUTOSTART_DIR/traework_autocheckin.desktop"
@@ -93,13 +100,19 @@ X-GNOME-Autostart-enabled=true
 EOF
 
   chmod +x "$DESKTOP_FILE"
-  echo "[成功] Linux 桌面登录自启项已成功安装！"
-  echo "效果：每次登录桌面环境后，系统将自动在后台静默运行并弹出桌面通知。"
+
+  # 配置 crontab 每日零点定时签到 (作为通宵在线的补充保障)
+  if command -v crontab >/dev/null 2>&1; then
+    (crontab -l 2>/dev/null | grep -v "TraeWorkCheckin_Daily" ; echo "0 0 * * * /bin/bash \"$RUNNER\" --silent # TraeWorkCheckin_Daily") | crontab - 2>/dev/null || true
+  fi
+
+  echo "[成功] Linux 双轨自动签到系统已成功安装！"
+  echo "效果：(1) 每次登录桌面环境后静默检测；(2) 每日 00:00 自动触发签到，右下角弹出桌面通知。"
 }
 
 uninstall_linux() {
   echo ""
-  echo "[正在处理] 正在清理 Linux 桌面自启条目..."
+  echo "[正在处理] 正在清理 Linux 桌面自启条目与定时任务..."
   DESKTOP_FILE="$HOME/.config/autostart/traework_checkin.desktop"
   OLD_DESKTOP_FILE="$HOME/.config/autostart/traework_autocheckin.desktop"
   removed=0
@@ -111,12 +124,18 @@ uninstall_linux() {
     rm -f "$OLD_DESKTOP_FILE"
     removed=1
   fi
+
+  # 清理 crontab
+  if command -v crontab >/dev/null 2>&1; then
+    (crontab -l 2>/dev/null | grep -v "TraeWorkCheckin_Daily") | crontab - 2>/dev/null || true
+  fi
+
   if [ "$removed" -eq 1 ]; then
-    echo "[成功] 已成功移除自启桌面文件。"
+    echo "[成功] 已成功移除自启桌面文件与定时任务。"
   else
     echo "[提示] 未检测到已安装的自启条目。"
   fi
-  echo "[完成] Linux 自启配置已全部清理干净。"
+  echo "[完成] Linux 自动签到配置已全部清理干净。"
 }
 
 do_install() {
@@ -154,8 +173,8 @@ elif [ "$1" = "--run" ] || [ "$1" = "-r" ] || [ "$1" = "run" ]; then
 fi
 
 options=(
-  "安装开机自启任务 (登录系统桌面后后台静默签到并弹窗通知)"
-  "卸载开机自启任务 (彻底移除已配置的系统自启服务)"
+  "安装双轨全自动签到 (开机登录静默自启 + 每日零点定时触发)"
+  "卸载所有自动任务 (彻底移除开机自启项与 TraeWork 定时任务)"
   "立即测试执行签到 (查看当前运行效果与实时控制台输出)"
   "退出管理程序"
 )

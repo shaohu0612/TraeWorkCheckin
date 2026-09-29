@@ -10,11 +10,12 @@ const { execFile, execFileSync, spawn } = require('child_process');
 /**
  * TraeWorkCheckin 每日自动签到核心引擎
  * -----------------------------------------------------------
- * 1. 开机网络异步就绪与自愈探测：轻量探活，开机未联网时自愈等待，恢复后秒级唤醒；
- * 2. 零内存常驻与极速资源回收：完成日志与通知后立即销毁退出，内存彻底归零；
- * 3. 三重兜底保障机制：运行时重试 + 30分钟临时计划任务 (TraeWorkCheckin_Retry) + 失效弹窗；
- * 4. 严格防风控设计：先查后签秒级跳过、开机随机抖动 Jitter、官方设备指纹 100% 拟真；
- * 5. 任务命名空间隔离：计划任务与重试任务强绑定 TraeWork 前缀，杜绝与同类工具冲突。
+ * 1. 双轨保障机制：开机登录自启 + 每日 00:00:30 定时触发（计算机每日只要在线，必定能签到成功）；
+ * 2. 开机网络异步就绪与自愈探测：轻量探活，开机未联网时自愈等待，恢复后秒级唤醒；
+ * 3. 零内存常驻与极速资源回收：完成日志与通知后立即销毁退出，内存彻底归零；
+ * 4. 三重兜底保障机制：运行时重试 + 30分钟临时计划任务 (TraeWorkCheckin_Retry) + 失效弹窗；
+ * 5. 严格防风控设计：先查后签秒级跳过、开机随机抖动 Jitter、官方设备指纹 100% 拟真；
+ * 6. 原生通知安全派发：Windows Toast / 托盘气泡同步阻塞交付，彻底消除退出竞争丢件。
  */
 
 // 全局常量配置
@@ -198,7 +199,7 @@ function cleanRetryTask() {
 
 /**
  * 跨平台弹出原生桌面系统通知（Windows Toast/托盘气泡、macOS 通知、Linux notify-send）
- * 采用进程分离模式，确保主程序可以毫秒级退出销毁
+ * 在 Windows 平台下采用轻量同步阻塞执行（~200ms），确保通知指令稳妥交付系统底层后再释放进程退出
  * @param {string} title 通知标题
  * @param {string} message 通知正文
  */
@@ -209,12 +210,17 @@ function showNotification(title, message) {
 
     if (process.platform === 'win32') {
       const psCommand = `
+        $aumidKey = 'HKCU:\\Software\\Classes\\AppUserModelId\\TraeWorkCheckin'
+        if (-not (Test-Path $aumidKey)) {
+          $null = New-Item -Path $aumidKey -Force -ErrorAction SilentlyContinue
+          $null = Set-ItemProperty -Path $aumidKey -Name 'DisplayName' -Value 'TraeWork 签到助手' -Type String -ErrorAction SilentlyContinue
+        }
         try {
-          [Windows.UI.Notifications.ToastNotificationManager, Windows.UI.Notifications, ContentType = WindowsRuntime] > $null
+          [void][Windows.UI.Notifications.ToastNotificationManager, Windows.UI.Notifications, ContentType = WindowsRuntime]
           $template = [Windows.UI.Notifications.ToastNotificationManager]::GetTemplateContent([Windows.UI.Notifications.ToastTemplateType]::ToastText02)
           $textNodes = $template.GetElementsByTagName("text")
-          $textNodes.Item(0).AppendChild($template.CreateTextNode("${cleanTitle}")) > $null
-          $textNodes.Item(1).AppendChild($template.CreateTextNode("${cleanMsg}")) > $null
+          $null = $textNodes.Item(0).AppendChild($template.CreateTextNode("${cleanTitle}"))
+          $null = $textNodes.Item(1).AppendChild($template.CreateTextNode("${cleanMsg}"))
           $notifier = [Windows.UI.Notifications.ToastNotificationManager]::CreateToastNotifier("TraeWorkCheckin")
           $notification = [Windows.UI.Notifications.ToastNotification]::new($template)
           $notifier.Show($notification)
@@ -231,11 +237,10 @@ function showNotification(title, message) {
         }
       `;
 
-      const child = spawn('powershell', ['-NoProfile', '-WindowStyle', 'Hidden', '-Command', psCommand], {
-        detached: true,
-        stdio: 'ignore'
+      execFileSync('powershell', ['-NoProfile', '-WindowStyle', 'Hidden', '-Command', psCommand], {
+        stdio: 'ignore',
+        timeout: 4000
       });
-      child.unref();
     } else if (process.platform === 'darwin') {
       const child = spawn('osascript', ['-e', `display notification "${cleanMsg}" with title "${cleanTitle}"`], {
         detached: true,

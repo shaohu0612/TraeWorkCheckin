@@ -1,12 +1,12 @@
 ﻿# ====================================================
-# TraeWorkCheckin - 开机自启管理控制台 (PowerShell 交互式)
+# TraeWorkCheckin - 自动签到管理控制台 (PowerShell 交互式)
 # ====================================================
 
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
 $OutputEncoding = [System.Text.Encoding]::UTF8
 
 try {
-    $Host.UI.RawUI.WindowTitle = "TraeWorkCheckin - 开机自启管理控制台"
+    $Host.UI.RawUI.WindowTitle = "TraeWorkCheckin - 自动签到管理控制台"
 } catch {}
 
 $scriptDir = $PSScriptRoot
@@ -17,49 +17,94 @@ if (-not $scriptDir) {
     $scriptDir = (Get-Location).Path
 }
 
+function Get-UserStartupDir {
+    $dir = [Environment]::GetFolderPath('Startup')
+    if (-not $dir) {
+        $dir = [Environment]::GetFolderPath([Environment+SpecialFolder]::Startup)
+    }
+    if (-not $dir) {
+        $dir = Join-Path $env:APPDATA 'Microsoft\Windows\Start Menu\Programs\Startup'
+    }
+    return $dir
+}
+
 function Invoke-InstallTask {
     param([bool]$interactive = $true)
     Clear-Host
     Write-Host "====================================================" -ForegroundColor Cyan
-    Write-Host "   TraeWorkCheckin - 安装开机自启任务" -ForegroundColor Cyan
+    Write-Host "   TraeWorkCheckin - 安装全自动双轨签到系统" -ForegroundColor Cyan
     Write-Host "====================================================" -ForegroundColor Cyan
     Write-Host ""
-    Write-Host "[处理中] 正在配置系统启动项并清理旧任务..." -ForegroundColor DarkGray
+    Write-Host "[处理中] 正在配置系统启动项、00:00:30 定时任务并清理旧任务..." -ForegroundColor DarkGray
 
     $ws = New-Object -ComObject WScript.Shell
-    $startupDir = [Environment]::GetFolderPath('Startup')
+    $startupDir = Get-UserStartupDir
 
-    # 先清理可能存在的旧版本或同名快捷方式
+    # 1. 注册持久化 AUMID，保障 Windows 原生通知权限与右下角横幅正常展示
+    $aumidKey = 'HKCU:\Software\Classes\AppUserModelId\TraeWorkCheckin'
+    try {
+        if (-not (Test-Path $aumidKey)) {
+            New-Item -Path $aumidKey -Force | Out-Null
+        }
+        Set-ItemProperty -Path $aumidKey -Name 'DisplayName' -Value 'TraeWork 签到助手' -Type String -ErrorAction SilentlyContinue
+    } catch {}
+
+    # 2. 先清理可能存在的旧版本或同名快捷方式
     $lnkPath = Join-Path $startupDir 'TraeWorkCheckin.lnk'
     $oldLnkPath = Join-Path $startupDir 'TraeWorkAutoCheckin.lnk'
     if (Test-Path $lnkPath) { Remove-Item $lnkPath -Force -ErrorAction SilentlyContinue }
     if (Test-Path $oldLnkPath) { Remove-Item $oldLnkPath -Force -ErrorAction SilentlyContinue }
 
-    # 极速清理所有带有 TraeWork 字样的计划任务（采用 schtasks，毫秒级响应，杜绝卡顿）
+    # 3. 极速清理所有带有 TraeWork 字样的旧计划任务（采用 schtasks，毫秒级响应，杜绝卡顿）
+    schtasks /Delete /TN 'TraeWorkCheckin_Daily' /F 2>$null | Out-Null
     schtasks /Delete /TN 'TraeWorkCheckin_Retry' /F 2>$null | Out-Null
     schtasks /Delete /TN 'TraeWorkCheckin' /F 2>$null | Out-Null
     schtasks /Delete /TN 'TraeWork每日签到' /F 2>$null | Out-Null
     schtasks /Delete /TN 'TraeWorkAutoCheckin' /F 2>$null | Out-Null
 
-    # 创建指向 run_traework_checkin.cmd 的开机快捷方式（专属命名避免启动项与其他应用重名）
+    # 4. 创建开机自启动快捷方式（指向无黑框静默执行器）
+    $vbsPath = Join-Path $scriptDir 'run_traework_checkin_silent.vbs'
+    $wscriptExe = Join-Path $env:SystemRoot 'System32\wscript.exe'
+    if (-not (Test-Path $wscriptExe)) { $wscriptExe = 'wscript.exe' }
+
     $lnk = $ws.CreateShortcut($lnkPath)
-    $lnk.TargetPath = Join-Path $scriptDir 'run_traework_checkin.cmd'
-    $lnk.Arguments = '--silent'
+    if (Test-Path $vbsPath) {
+        $lnk.TargetPath = $wscriptExe
+        $lnk.Arguments = "//B //Nologo `"$vbsPath`""
+    } else {
+        $lnk.TargetPath = Join-Path $scriptDir 'run_traework_checkin.cmd'
+        $lnk.Arguments = '--silent'
+    }
     $lnk.WorkingDirectory = $scriptDir
     $lnk.WindowStyle = 7 # 7 = 最小化后台静默启动
-    $lnk.Description = 'TraeWork 每日自动检测签到'
+    $lnk.Description = 'TraeWork 每日自动检测签到 (双轨保障)'
     $lnk.Save()
+
+    # 5. 配置每日 00:00:30 定时触发任务（作为全天在线/通宵在线的即时签到补充）
+    $dailyTaskName = 'TraeWorkCheckin_Daily'
+    if (Test-Path $vbsPath) {
+        $taskTarget = "`"$wscriptExe`" //B //Nologo `"$vbsPath`""
+    } else {
+        $cmdRunner = Join-Path $scriptDir 'run_traework_checkin.cmd'
+        $taskTarget = "`"$cmdRunner`" --silent"
+    }
+    schtasks /Create /TN $dailyTaskName /SC DAILY /ST 00:00:30 /TR $taskTarget /F 2>$null | Out-Null
+
+    $dailyInstalled = ($LASTEXITCODE -eq 0)
 
     Write-Host ""
     if (Test-Path $lnkPath) {
-        Write-Host "[成功] TraeWorkCheckin 开机自动签到任务已成功安装！" -ForegroundColor Green
+        Write-Host "[成功] TraeWorkCheckin 双轨自动签到系统已成功安装！" -ForegroundColor Green
         Write-Host ""
-        Write-Host "运行机制与安全保障：" -ForegroundColor Cyan
-        Write-Host "  1. 每次开机登录 Windows 桌面后，系统将自动在后台静默运行；" -ForegroundColor Gray
-        Write-Host "  2. 自动检测今日是否已签到：若已签到秒级自动跳过，绝不重复调用接口（防风控）；" -ForegroundColor Gray
-        Write-Host "  3. 若开机时尚未联网，脚本自动静默等待网络就绪并自愈恢复启动；" -ForegroundColor Gray
-        Write-Host "  4. 具备三重兜底保障机制（网络故障自动注册 TraeWorkCheckin_Retry 单次重试任务）；" -ForegroundColor Gray
-        Write-Host "  5. 运行完毕后，屏幕右下角自动弹出原生通知提醒，进程随即安全退出，零内存驻留。" -ForegroundColor Gray
+        Write-Host "运行机制与双轨兜底保障：" -ForegroundColor Cyan
+        Write-Host "  1. 轨道一（开机自启）：每次开机登录 Windows 桌面后，系统在后台静默运行检测签到；" -ForegroundColor Gray
+        Write-Host "  2. 轨道二（每日零点）：每日 00:00:30 自动触发签到，若电脑夜间在线第一时间完成领取；" -ForegroundColor Gray
+        Write-Host "  3. 智能互补与防风控：每日只要计算机曾在线，即可确保签到成功；已签到秒级跳过，不发多余请求；" -ForegroundColor Gray
+        Write-Host "  4. 网络异步自愈：若启动时尚未联网，脚本自动低功耗等待网络就绪（最长 300 秒）；" -ForegroundColor Gray
+        Write-Host "  5. 原生系统反馈：签到完成或跳过后，屏幕右下角自动弹出 Windows 原生 Toast 通知。" -ForegroundColor Gray
+        if (-not $dailyInstalled) {
+            Write-Host "  [提示] 每日 00:00:30 计划任务配置受限，但开机自启动项已正常就绪。" -ForegroundColor Yellow
+        }
     } else {
         Write-Host "[失败] 快捷方式生成失败，请检查启动目录权限。" -ForegroundColor Red
     }
@@ -85,12 +130,12 @@ function Invoke-UninstallTask {
     param([bool]$interactive = $true)
     Clear-Host
     Write-Host "====================================================" -ForegroundColor Cyan
-    Write-Host "   TraeWorkCheckin - 卸载开机自启任务" -ForegroundColor Cyan
+    Write-Host "   TraeWorkCheckin - 卸载自动签到任务" -ForegroundColor Cyan
     Write-Host "====================================================" -ForegroundColor Cyan
     Write-Host ""
     Write-Host "[处理中] 正在清理启动项与计划任务..." -ForegroundColor DarkGray
 
-    $startupDir = [Environment]::GetFolderPath('Startup')
+    $startupDir = Get-UserStartupDir
     $lnkPath = Join-Path $startupDir 'TraeWorkCheckin.lnk'
     $oldLnkPath = Join-Path $startupDir 'TraeWorkAutoCheckin.lnk'
 
@@ -104,7 +149,8 @@ function Invoke-UninstallTask {
         $removed = $true
     }
 
-    # 极速清理所有带有 TraeWork 字样的计划任务与兜底重试任务（采用 schtasks，毫秒级响应）
+    # 极速清理所有带有 TraeWork 字样的计划任务、每日任务与兜底重试任务（采用 schtasks，毫秒级响应）
+    schtasks /Delete /TN 'TraeWorkCheckin_Daily' /F 2>$null | Out-Null
     schtasks /Delete /TN 'TraeWorkCheckin_Retry' /F 2>$null | Out-Null
     schtasks /Delete /TN 'TraeWorkCheckin' /F 2>$null | Out-Null
     schtasks /Delete /TN 'TraeWork每日签到' /F 2>$null | Out-Null
@@ -179,8 +225,8 @@ if ($firstArg -in @('--run', '-r', 'run')) {
 
 # 交互式菜单选项定义
 $options = @(
-    @{ Text = "安装开机自启任务 (开机后台静默检测签到，右下角弹窗通知)"; Action = "install" },
-    @{ Text = "卸载开机自启任务 (彻底移除开机自启动项与 TraeWork 兜底任务)"; Action = "uninstall" },
+    @{ Text = "安装双轨全自动签到 (开机登录静默自启 + 每日 00:00:30 定时触发)"; Action = "install" },
+    @{ Text = "卸载所有自动任务 (彻底移除开机自启项与 TraeWork 定时/重试任务)"; Action = "uninstall" },
     @{ Text = "立即测试执行签到 (查看实时控制台输出与积分状态播报)"; Action = "run" },
     @{ Text = "退出管理程序"; Action = "exit" }
 )
@@ -189,10 +235,31 @@ function Render-Menu {
     param([int]$curIndex)
     Clear-Host
     Write-Host "====================================================" -ForegroundColor Cyan
-    Write-Host "      TraeWorkCheckin - 开机自启管理控制台" -ForegroundColor Cyan
+    Write-Host "      TraeWorkCheckin - 自动签到管理控制台" -ForegroundColor Cyan
     Write-Host "====================================================" -ForegroundColor Cyan
     Write-Host "  提示：使用键盘 [↑ / ↓] 键移动光标，按 [Enter] 确认选择" -ForegroundColor DarkGray
     Write-Host "        亦可直接按下对应数字键 [1 / 2 / 3 / 0] 快速选择" -ForegroundColor DarkGray
+    Write-Host "----------------------------------------------------" -ForegroundColor DarkGray
+
+    # 实时检测当前系统配置状态
+    $startupDir = Get-UserStartupDir
+    $lnkInstalled = Test-Path (Join-Path $startupDir 'TraeWorkCheckin.lnk')
+    
+    $dailyTask = schtasks /Query /TN 'TraeWorkCheckin_Daily' 2>$null
+    $dailyInstalled = ($LASTEXITCODE -eq 0)
+
+    Write-Host "当前防护：" -ForegroundColor Cyan -NoNewline
+    if ($lnkInstalled) {
+        Write-Host "开机自启 [已就绪]  " -ForegroundColor Green -NoNewline
+    } else {
+        Write-Host "开机自启 [未安装]  " -ForegroundColor DarkGray -NoNewline
+    }
+    if ($dailyInstalled) {
+        Write-Host "00:00:30定时 [已就绪]  " -ForegroundColor Green -NoNewline
+    } else {
+        Write-Host "00:00:30定时 [未配置]  " -ForegroundColor DarkGray -NoNewline
+    }
+    Write-Host "原生通知 [支持]" -ForegroundColor Green
     Write-Host "----------------------------------------------------" -ForegroundColor DarkGray
     Write-Host ""
 
@@ -218,7 +285,7 @@ function Show-StandardMenu {
     while ($true) {
         Write-Host ""
         Write-Host "====================================================" -ForegroundColor Cyan
-        Write-Host "      TraeWorkCheckin - 开机自启管理控制台" -ForegroundColor Cyan
+        Write-Host "      TraeWorkCheckin - 自动签到管理控制台" -ForegroundColor Cyan
         Write-Host "====================================================" -ForegroundColor Cyan
         for ($i = 0; $i -lt $options.Count; $i++) {
             $keyHint = if ($i -eq $options.Count - 1) { "0" } else { "$($i + 1)" }
